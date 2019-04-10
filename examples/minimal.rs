@@ -1,0 +1,43 @@
+// Copyright (c) 2019 Jason White
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+use std::io;
+use std::net::SocketAddr;
+
+use futures::{future, Future};
+use github_app::{self, Event, GithubApp};
+use tokio;
+
+#[derive(Clone)]
+struct MyApp;
+
+impl GithubApp for MyApp {
+    type Error = io::Error;
+    type Future = Box<dyn Future<Item = (), Error = Self::Error> + Send>;
+
+    fn call(&mut self, event: Event) -> Self::Future {
+        println!("{:#?}", event);
+        Box::new(future::ok(()))
+    }
+}
+
+fn main() {
+    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+    tokio::run(github_app::server(&addr, MyApp).map_err(|e| println!("{}", e)))
+}

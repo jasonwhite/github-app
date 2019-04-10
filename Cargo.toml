@@ -1,0 +1,44 @@
+[package]
+name = "github-app"
+version = "0.1.0"
+authors = ["Jason White <rust@jasonwhite.io>"]
+edition = "2018"
+description = """
+A Rust library for making GitHub Apps and bots.
+"""
+documentation = "https://docs.rs/github-app"
+homepage = "https://github.com/jasonwhite/github-app"
+readme = "README.md"
+keywords = ["github", "api"]
+categories = ["api-bindings"]
+license = "MIT"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+crypto-mac = "0.7"
+derive_more = "0.14"
+env_logger = "0.6"
+futures = "0.1"
+hex = "0.3"
+hmac = "0.7"
+humantime = "1"
+hyper = "0.12"
+log = "0.4"
+serde = "1"
+serde_json = "1"
+sha-1 = "0.8"
+envy = "0.4"
+reqwest = { version = "0.9", default-features = false, features = ["rustls-tls"] }
+github-types = "0.1"
+
+[dev-dependencies]
+tokio = "0.1"
+pretty_env_logger = "0.3"
+structopt = "0.2"
+nom_pem = "4"
+
+[dependencies.hubcaps]
+git = "https://github.com/jasonwhite/hubcaps"
+branch = "jason/fixes"
+default-features = false
+features = ["rustls-tls"]
