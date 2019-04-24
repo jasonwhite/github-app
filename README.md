@@ -1,5 +1,7 @@
 # github-app
 
+[![Build Status](https://api.cirrus-ci.com/github/jasonwhite/github-app.svg?branch=master)](https://cirrus-ci.com/github/jasonwhite/github-app) [![Crates.io](https://img.shields.io/crates/v/github-app.svg)](https://crates.io/crates/github-app) [![Documentation](https://docs.rs/github-app/badge.svg)](https://docs.rs/github-app)
+
 A Rust library for creating GitHub Apps.
 
 ## Features
