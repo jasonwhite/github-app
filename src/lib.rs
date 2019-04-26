@@ -228,6 +228,8 @@ fn parse_event(
 ) -> Result<Event, serde_json::Error> {
     Ok(match event_type {
         EventType::Ping => Event::Ping(serde_json::from_slice(slice)?),
+        EventType::CheckRun => Event::CheckRun(serde_json::from_slice(slice)?),
+        EventType::CheckSuite => Event::CheckSuite(serde_json::from_slice(slice)?),
         EventType::CommitComment => {
             Event::CommitComment(serde_json::from_slice(slice)?)
         }
