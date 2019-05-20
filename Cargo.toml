@@ -37,8 +37,8 @@ structopt = "0.2"
 nom_pem = "4"
 
 [dependencies.hubcaps]
-git = "https://github.com/softprops/hubcaps"
-branch = "master"
+git = "https://github.com/jasonwhite/hubcaps"
+branch = "jason/fixes"
 default-features = false
 features = ["rustls-tls"]
 
