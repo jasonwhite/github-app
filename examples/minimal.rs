@@ -1,4 +1,5 @@
 // Copyright (c) 2019 Jason White
+// Copyright (c) 2019 Mike Lubinets
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -19,6 +20,7 @@
 // SOFTWARE.
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 
 use futures::{future, Future};
 use github_app::{self, Event, GithubApp};
@@ -29,15 +31,19 @@ struct MyApp;
 
 impl GithubApp for MyApp {
     type Error = io::Error;
-    type Future = Box<dyn Future<Item = (), Error = Self::Error> + Send>;
+    type Future = Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send>>;
 
     fn call(&mut self, event: Event) -> Self::Future {
         println!("{:#?}", event);
-        Box::new(future::ok(()))
+        Box::pin(future::ok(()))
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
-    tokio::run(github_app::server(&addr, MyApp).map_err(|e| println!("{}", e)))
+
+    if let Err(err) = github_app::server(&addr, MyApp).await {
+        println!("{}", err)
+    }
 }

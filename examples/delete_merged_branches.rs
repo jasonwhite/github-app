@@ -1,4 +1,5 @@
 // Copyright (c) 2019 Jason White
+// Copyright (c) 2019 Mike Lubinets
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -24,10 +25,10 @@ use std::fs;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::process::exit;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use futures::{future, Future};
+use futures::{compat::Future01CompatExt, future, Future, TryFutureExt};
 use log;
 use nom_pem;
 use pretty_env_logger;
@@ -55,7 +56,7 @@ impl DeleteMergedBranches {
 
 impl GithubApp for DeleteMergedBranches {
     type Error = io::Error;
-    type Future = Box<dyn Future<Item = (), Error = Self::Error> + Send>;
+    type Future = Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send>>;
 
     fn secret(&self) -> Option<&str> {
         self.state.app_secret.as_ref().map(String::as_str)
@@ -66,7 +67,7 @@ impl GithubApp for DeleteMergedBranches {
             Event::PullRequest(pr) => {
                 // Only delete merged branches.
                 if !pr.pull_request.merged {
-                    return Box::new(future::ok(()));
+                    return Box::pin(future::ok(()));
                 }
 
                 if let Some(client) =
@@ -74,18 +75,19 @@ impl GithubApp for DeleteMergedBranches {
                 {
                     log::info!(
                         "Deleting branch '{}' in: {}",
-                        pr.pull_request.head.commit_ref,
+                        pr.pull_request.head.git_ref,
                         pr.pull_request.html_url
                     );
 
-                    Box::new(
+                    Box::pin(
                         client
                             .repo(pr.repository.owner.login, pr.repository.name)
                             .git()
                             .delete_reference(format!(
                                 "heads/{}",
-                                pr.pull_request.head.commit_ref
+                                pr.pull_request.head.git_ref
                             ))
+                            .compat()
                             .map_err(|e| {
                                 io::Error::new(
                                     io::ErrorKind::Other,
@@ -94,10 +96,10 @@ impl GithubApp for DeleteMergedBranches {
                             }),
                     )
                 } else {
-                    Box::new(future::ok(()))
+                    Box::pin(future::ok(()))
                 }
             }
-            _ => Box::new(future::ok(())),
+            _ => Box::pin(future::ok(())),
         }
     }
 }
@@ -129,41 +131,31 @@ struct Args {
     api: String,
 }
 
-impl Args {
-    fn main(self) -> Result<(), Box<dyn std::error::Error>> {
-        // Initialize logging.
-        pretty_env_logger::formatted_timed_builder()
-            .filter_module("delete_merged_branches", self.log_level)
-            .filter_module("github_app", self.log_level)
-            .init();
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::from_args();
 
-        // Read the PEM file.
-        let key = fs::read(self.key)?;
-        let key = nom_pem::decode_block(&key).unwrap();
+    // Initialize logging.
+    pretty_env_logger::formatted_timed_builder()
+        .filter_module("delete_merged_branches", args.log_level)
+        .filter_module("github_app", args.log_level)
+        .init();
 
-        // Create the app.
-        let app = DeleteMergedBranches::new(Arc::new(State {
-            app_secret: self.app_secret,
-            client_pool: ClientPool::new(
-                self.api,
-                JWTCredentials::new(self.app_id, key.data)?,
-            ),
-        }));
+    // Read the PEM file.
+    let key = fs::read(args.key)?;
+    let key = nom_pem::decode_block(&key).unwrap();
 
-        // Run the app.
-        tokio::run(server(&self.addr, app).map_err(|e| log::error!("{}", e)));
+    // Create the app.
+    let app = DeleteMergedBranches::new(Arc::new(State {
+        app_secret: args.app_secret,
+        client_pool: ClientPool::new(
+            args.api,
+            JWTCredentials::new(args.app_id, key.data)?,
+        ),
+    }));
 
-        Ok(())
-    }
-}
+    // Run the app.
+    server(&args.addr, app).await?;
 
-fn main() {
-    let exit_code = if let Err(err) = Args::from_args().main() {
-        log::error!("{}", err);
-        1
-    } else {
-        0
-    };
-
-    exit(exit_code);
+    Ok(())
 }

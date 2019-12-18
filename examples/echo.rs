@@ -1,4 +1,5 @@
 // Copyright (c) 2019 Jason White
+// Copyright (c) 2019 Mike Lubinets
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -23,7 +24,7 @@
 
 use std::io;
 use std::net::SocketAddr;
-use std::process::exit;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::{future, Future};
@@ -50,7 +51,7 @@ impl Echo {
 
 impl GithubApp for Echo {
     type Error = io::Error;
-    type Future = Box<dyn Future<Item = (), Error = Self::Error> + Send>;
+    type Future = Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send>>;
 
     fn secret(&self) -> Option<&str> {
         self.state.app_secret.as_ref().map(String::as_str)
@@ -58,7 +59,7 @@ impl GithubApp for Echo {
 
     fn call(&mut self, event: Event) -> Self::Future {
         println!("{:#?}", event);
-        Box::new(future::ok(()))
+        Box::pin(future::ok(()))
     }
 }
 
@@ -78,33 +79,23 @@ struct Args {
     app_secret: Option<String>,
 }
 
-impl Args {
-    fn main(self) -> Result<(), Box<dyn std::error::Error>> {
-        // Initialize logging.
-        pretty_env_logger::formatted_timed_builder()
-            .filter_module("echo", self.log_level)
-            .filter_module("github_app", self.log_level)
-            .init();
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::from_args();
 
-        // Create the app.
-        let app = Echo::new(Arc::new(State {
-            app_secret: self.app_secret,
-        }));
+    // Initialize logging.
+    pretty_env_logger::formatted_timed_builder()
+        .filter_module("echo", args.log_level)
+        .filter_module("github_app", args.log_level)
+        .init();
 
-        // Run the app.
-        tokio::run(server(&self.addr, app).map_err(|e| log::error!("{}", e)));
+    // Create the app.
+    let app = Echo::new(Arc::new(State {
+        app_secret: args.app_secret,
+    }));
 
-        Ok(())
-    }
-}
+    // Run the app.
+    server(&args.addr, app).await?;
 
-fn main() {
-    let exit_code = if let Err(err) = Args::from_args().main() {
-        log::error!("{}", err);
-        1
-    } else {
-        0
-    };
-
-    exit(exit_code);
+    Ok(())
 }
