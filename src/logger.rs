@@ -1,4 +1,5 @@
 // Copyright (c) 2019 Jason White
+// Copyright (c) 2019 Mike Lubinets
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -21,10 +22,12 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::time::Instant;
 
+use futures::task::{Context, Poll};
 use futures::Future;
 use humantime::format_duration;
 use hyper::{service::Service, Request, Response};
 use log;
+use std::pin::Pin;
 
 /// Wraps a service to provide logging on both the request and the response.
 pub struct Logger<S> {
@@ -41,27 +44,38 @@ impl<S> Logger<S> {
     }
 }
 
-impl<S> Service for Logger<S>
+impl<S, B, RB> Service<Request<B>> for Logger<S>
 where
-    S: Service,
+    B: Send,
+    S: Service<Request<B>, Response = Response<RB>> + Send,
     S::Future: Send + 'static,
     S::Error: fmt::Display + Send + 'static,
 {
-    type ReqBody = S::ReqBody;
-    type ResBody = S::ResBody;
+    type Response = S::Response;
     type Error = S::Error;
-    type Future = Box<
-        dyn Future<Item = Response<Self::ResBody>, Error = Self::Error> + Send,
+    type Future = Pin<
+        Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>,
     >;
 
-    fn call(&mut self, req: Request<Self::ReqBody>) -> Self::Future {
+    fn poll_ready(
+        &mut self,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: Request<B>) -> Self::Future {
         let method = req.method().clone();
         let uri = req.uri().clone();
         let remote_addr = self.remote_addr;
 
         let start = Instant::now();
 
-        Box::new(self.service.call(req).then(move |response| {
+        let response = self.service.call(req);
+
+        let response = async move {
+            let response = response.await;
+
             match &response {
                 Ok(response) => log::info!(
                     "[{}] {} {} - {} ({})",
@@ -82,6 +96,8 @@ where
             };
 
             response
-        }))
+        };
+
+        Box::pin(response)
     }
 }

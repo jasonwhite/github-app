@@ -1,4 +1,5 @@
 // Copyright (c) 2019 Jason White
+// Copyright (c) 2019 Mike Lubinets
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -26,7 +27,7 @@ pub use github_types as types;
 pub use types::{AppEvent, Event, EventType};
 
 use std::collections::HashMap;
-use std::convert::Infallible;
+use std::convert::{From, Infallible};
 use std::fmt;
 use std::net::SocketAddr;
 use std::str::{from_utf8, FromStr};
@@ -34,10 +35,7 @@ use std::sync::Mutex;
 
 use crypto_mac::MacError;
 use derive_more::{Display, From};
-use futures::{
-    future::{self, Either},
-    Future, Stream,
-};
+use futures::{future, Future, StreamExt};
 use hmac::{Hmac, Mac};
 use hubcaps::{Credentials, InstallationTokenGenerator};
 use hyper::{self, server::conn::AddrStream, service::make_service_fn, Server};
@@ -51,12 +49,14 @@ use reqwest::r#async::Client;
 use sha1::Sha1;
 
 // Re-export these to avoid forcing users to add a dependency on hubcaps.
+use futures::task::{Context, Poll};
 pub use hubcaps::{self, Github, JWTCredentials};
+use std::pin::Pin;
 
 /// A trait that a Github app must implement.
 pub trait GithubApp: Clone {
     type Error: fmt::Display;
-    type Future: Future<Item = (), Error = Self::Error> + Send;
+    type Future: Future<Output = Result<(), Self::Error>> + Send;
 
     /// The secret that was created when the app was created. This is used to
     /// verify that webhook payloads are really coming from GitHub.
@@ -82,41 +82,56 @@ impl<T> App<T> {
     }
 }
 
-impl<T> Service for App<T>
+impl<T> App<T>
 where
-    T: GithubApp + Send + 'static,
+    T: GithubApp + Sync + Send + 'static,
 {
-    type ReqBody = Body;
-    type ResBody = Body;
+    async fn handle_request(
+        mut app: T,
+        req: Request<Body>,
+    ) -> Result<Response<Body>, hyper::http::Error> {
+        let payload = match parse_request(req, app.secret()).await {
+            Ok(p) => p,
+            Err(err) => {
+                return Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(err.to_string().into())
+            }
+        };
+
+        if let Err(err) = app.call(payload).await {
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(err.to_string().into());
+        };
+
+        Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::empty())
+    }
+}
+
+impl<T> Service<Request<Body>> for App<T>
+where
+    T: GithubApp + Sync + Send + 'static,
+{
+    type Response = Response<Body>;
     type Error = hyper::http::Error;
-    type Future = Box<
-        dyn Future<Item = Response<Self::ResBody>, Error = Self::Error> + Send,
+    type Future = Pin<
+        Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>,
     >;
 
-    fn call(&mut self, req: Request<Self::ReqBody>) -> Self::Future {
-        let mut app = self.app.clone();
+    fn poll_ready(
+        &mut self,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
 
-        Box::new(parse_request(req, app.secret()).then(move |result| {
-            match result {
-                Ok(payload) => {
-                    Either::A(app.call(payload).then(move |result| {
-                        match result {
-                            Ok(()) => Response::builder()
-                                .status(StatusCode::OK)
-                                .body(Body::empty()),
-                            Err(e) => Response::builder()
-                                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                .body(Body::from(e.to_string())),
-                        }
-                    }))
-                }
-                Err(err) => Either::B(future::result(
-                    Response::builder()
-                        .status(StatusCode::BAD_REQUEST)
-                        .body(err.to_string().into()),
-                )),
-            }
-        }))
+    fn call(&mut self, req: Request<Body>) -> Self::Future {
+        let app = self.app.clone();
+        let response = Self::handle_request(app, req);
+        Box::pin(response)
     }
 }
 
@@ -144,21 +159,48 @@ pub enum Error {
     #[display(fmt = "Invalid X-Hub-Signature")]
     InvalidSignature,
 
+    #[display(fmt = "HTTP Error")]
+    Http(hyper::http::Error),
+
     Payload(PayloadError),
+}
+
+impl From<hyper::Error> for Error {
+    fn from(e: hyper::Error) -> Self {
+        Error::Payload(PayloadError::Hyper(e))
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(e: serde_json::Error) -> Self {
+        Error::Payload(PayloadError::Json(e))
+    }
+}
+
+impl From<MacError> for Error {
+    fn from(e: MacError) -> Self {
+        Error::Payload(PayloadError::Mac(e))
+    }
+}
+
+impl From<hyper::http::Error> for Error {
+    fn from(e: hyper::http::Error) -> Self {
+        Error::Http(e)
+    }
 }
 
 /// Parses a Hyper request for a Github event.
 ///
 /// This handles hmac signature verification to ensure that the payload actually
 /// came from Github.
-fn parse_request(
+async fn parse_request(
     req: Request<Body>,
     secret: Option<&str>,
-) -> impl Future<Item = Event, Error = Error> {
+) -> Result<Event, Error> {
     if req.headers().get(header::CONTENT_TYPE)
         != Some(&HeaderValue::from_static("application/json"))
     {
-        return Either::A(future::err(Error::ContentType));
+        return Err(Error::ContentType);
     }
 
     // Parse the event type.
@@ -172,12 +214,7 @@ fn parse_request(
                 .and_then(|s| {
                     EventType::from_str(s).map_err(|_| Error::InvalidEvent)
                 })
-        });
-
-    let event = match event {
-        Ok(event) => event,
-        Err(err) => return Either::A(future::err(err)),
-    };
+        })?;
 
     // Parse the signature
     let signature = req
@@ -190,36 +227,30 @@ fn parse_request(
                 .and_then(|s| {
                     Signature::from_str(s).map_err(|_| Error::InvalidSignature)
                 })
-        });
+        })?;
 
-    let signature = match signature {
-        Ok(signature) => signature,
-        Err(err) => return Either::A(future::err(err)),
-    };
-
-    let mac = secret.map(|s| Hmac::<Sha1>::new_varkey(s.as_bytes()).unwrap());
+    let mut mac =
+        secret.map(|s| Hmac::<Sha1>::new_varkey(s.as_bytes()).unwrap());
 
     // Parse the JSON payload.
-    Either::B(
-        req.into_body()
-            .from_err::<PayloadError>()
-            .fold((mac, Vec::new()), |(mut mac, mut buf), chunk| {
-                if let Some(mac) = mac.as_mut() {
-                    mac.input(&chunk);
-                }
+    let mut buf = Vec::new();
 
-                buf.extend(chunk);
-                Ok((mac, buf)) as Result<_, PayloadError>
-            })
-            .and_then(move |(mac, body)| {
-                if let Some(mac) = mac {
-                    mac.verify(signature.digest())?;
-                }
+    let mut body = req.into_body();
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk?;
 
-                Ok(parse_event(event, &body)?)
-            })
-            .map_err(Error::Payload),
-    )
+        if let Some(mac) = mac.as_mut() {
+            mac.input(&chunk);
+        }
+
+        buf.extend(chunk);
+    }
+
+    if let Some(mac) = mac {
+        mac.verify(signature.digest())?;
+    }
+
+    parse_event(event, &buf).map_err(Error::from)
 }
 
 fn parse_event(
@@ -229,7 +260,9 @@ fn parse_event(
     Ok(match event_type {
         EventType::Ping => Event::Ping(serde_json::from_slice(slice)?),
         EventType::CheckRun => Event::CheckRun(serde_json::from_slice(slice)?),
-        EventType::CheckSuite => Event::CheckSuite(serde_json::from_slice(slice)?),
+        EventType::CheckSuite => {
+            Event::CheckSuite(serde_json::from_slice(slice)?)
+        }
         EventType::CommitComment => {
             Event::CommitComment(serde_json::from_slice(slice)?)
         }
@@ -364,21 +397,20 @@ impl FromStr for Signature {
 pub fn server<T>(
     addr: &SocketAddr,
     app: T,
-) -> impl Future<Item = (), Error = hyper::Error>
+) -> impl Future<Output = Result<(), hyper::Error>>
 where
-    T: GithubApp + Send + 'static,
+    T: GithubApp + Sync + Send + Unpin + 'static,
 {
     // Create our service factory.
-    let new_service =
-        make_service_fn(move |socket: &AddrStream| -> Result<_, Infallible> {
-            // Create our app.
-            let service = App::new(app.clone());
+    let new_service = make_service_fn(move |socket: &AddrStream| {
+        // Create our app.
+        let service = App::new(app.clone());
 
-            // Add logging middleware
-            let service = Logger::new(socket.remote_addr(), service);
+        // Add logging middleware
+        let service = Logger::new(socket.remote_addr(), service);
 
-            Ok(service)
-        });
+        future::ready(Ok::<_, Infallible>(service))
+    });
 
     // Create the server.
     let server = Server::bind(addr).serve(new_service);
